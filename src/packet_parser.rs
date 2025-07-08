@@ -969,4 +969,370 @@ mod tests {
         let result = extract_ip_addresses(&packet);
         assert!(result.is_some());
     }
+
+    // 🔍 Edge Cases + Negative Testing
+    #[test]
+    fn test_malformed_ip_header_invalid_version() {
+        let mut packet = create_test_packet(
+            [192, 168, 1, 10],
+            [192, 168, 1, 1],
+            12345,
+            443,
+            0x18,
+            65535,
+            &[],
+        );
+        
+        // Change IP version from 4 to 6 (IPv6)
+        packet[14] = 0x60;
+        
+        let result = extract_ip_addresses(&packet);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_malformed_ip_header_invalid_ihl() {
+        let mut packet = create_test_packet(
+            [192, 168, 1, 10],
+            [192, 168, 1, 1],
+            12345,
+            443,
+            0x18,
+            65535,
+            &[],
+        );
+        
+        // Set invalid IHL (must be at least 5)
+        packet[14] = 0x40; // Version 4, IHL 4 (invalid)
+        
+        let result = extract_ip_addresses(&packet);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_malformed_ip_header_too_large_ihl() {
+        let mut packet = create_test_packet(
+            [192, 168, 1, 10],
+            [192, 168, 1, 1],
+            12345,
+            443,
+            0x18,
+            65535,
+            &[],
+        );
+        
+        // Set IHL too large (16 * 4 = 64 bytes, but packet is shorter)
+        packet[14] = 0x4F; // Version 4, IHL 15 (60 bytes)
+        
+        let result = extract_ip_addresses(&packet);
+        assert!(result.is_none());
+    }
+
+
+
+    #[test]
+    fn test_tls_payload_with_grease_values() {
+        // Create TLS record with GREASE values in cipher suites
+        let grease_cipher_suites = vec![
+            0x1A1A, // GREASE value
+            0x2A2A, // GREASE value
+            0x3A3A, // GREASE value
+            0xC02F, // Real cipher suite
+        ];
+        
+        let mut client_hello_data = vec![
+            0x03, 0x03, // Client version
+        ];
+        client_hello_data.extend_from_slice(&[0x01; 32]); // Random
+        client_hello_data.push(0x00); // Session ID length
+        client_hello_data.extend_from_slice(&(grease_cipher_suites.len() * 2).to_be_bytes()); // Cipher suites length
+        for &suite in &grease_cipher_suites {
+            client_hello_data.extend_from_slice(&(suite as u16).to_be_bytes());
+        }
+        client_hello_data.push(0x01); // Compression methods length
+        client_hello_data.push(0x00); // Compression method
+        client_hello_data.extend_from_slice(&[0x00, 0x00]); // Extensions length
+        
+        let tls_record = create_tls_record(0x16, 0x0303, &client_hello_data);
+        let packet = create_test_packet(
+            [192, 168, 1, 10],
+            [192, 168, 1, 1],
+            12345,
+            443,
+            0x18,
+            65535,
+            &tls_record,
+        );
+        
+        let result = extract_tls_payload(&packet);
+        assert!(result.is_some());
+        assert_eq!(result.unwrap(), tls_record);
+    }
+
+    #[test]
+    fn test_tls_payload_with_duplicate_extensions() {
+        // Create TLS record with duplicate extensions
+        let mut extensions_data = vec![
+            0x00, 0x04, // Extensions length
+            0x00, 0x0B, // Extension type: EC Point Formats
+            0x00, 0x02, // Extension length
+            0x01, 0x00, // Extension data
+            0x00, 0x0B, // Duplicate extension type
+            0x00, 0x02, // Extension length
+            0x01, 0x00, // Extension data
+        ];
+        
+        let mut client_hello_data = vec![
+            0x03, 0x03, // Client version
+        ];
+        client_hello_data.extend_from_slice(&[0x01; 32]); // Random
+        client_hello_data.push(0x00); // Session ID length
+        client_hello_data.extend_from_slice(&[0x00, 0x02]); // Cipher suites length
+        client_hello_data.extend_from_slice(&[0xC0, 0x2F]); // Cipher suite
+        client_hello_data.push(0x01); // Compression methods length
+        client_hello_data.push(0x00); // Compression method
+        client_hello_data.extend_from_slice(&(extensions_data.len() as u16).to_be_bytes()); // Extensions length
+        client_hello_data.extend_from_slice(&extensions_data);
+        
+        let tls_record = create_tls_record(0x16, 0x0303, &client_hello_data);
+        let packet = create_test_packet(
+            [192, 168, 1, 10],
+            [192, 168, 1, 1],
+            12345,
+            443,
+            0x18,
+            65535,
+            &tls_record,
+        );
+        
+        let result = extract_tls_payload(&packet);
+        assert!(result.is_some());
+        assert_eq!(result.unwrap(), tls_record);
+    }
+
+    #[test]
+    fn test_tls_payload_with_malformed_length() {
+        // Create TLS record with invalid length (shorter than declared)
+        let mut tls_record = vec![
+            0x16, // Content type: Handshake
+            0x03, 0x03, // Version: TLS 1.2
+            0x00, 0x10, // Length: 16 (but we only have 5 bytes)
+            0x01, 0x02, 0x03, 0x04, 0x05, // Only 5 bytes of payload
+        ];
+        
+        let packet = create_test_packet(
+            [192, 168, 1, 10],
+            [192, 168, 1, 1],
+            12345,
+            443,
+            0x18,
+            65535,
+            &tls_record,
+        );
+        
+        let result = extract_tls_payload(&packet);
+        assert!(result.is_some()); // Should still extract the record
+        assert_eq!(result.unwrap(), tls_record);
+    }
+
+    #[test]
+    fn test_tls_buffer_with_fragmented_record() {
+        let mut buffer = TlsBuffer::new();
+        
+        // Add first fragment (header only)
+        let header = vec![0x16, 0x03, 0x03, 0x00, 0x05];
+        assert!(!buffer.add_data(&header));
+        
+        // Add second fragment (payload)
+        let payload = vec![0x01, 0x02, 0x03, 0x04, 0x05];
+        assert!(buffer.add_data(&payload));
+        
+        // Extract complete record
+        let record = buffer.get_record();
+        assert!(record.is_some());
+        assert_eq!(record.unwrap(), vec![0x16, 0x03, 0x03, 0x00, 0x05, 0x01, 0x02, 0x03, 0x04, 0x05]);
+    }
+
+
+
+    // 🔐 PQC-specific Edge Cases
+    #[test]
+    fn test_pqc_hybrid_key_exchange_detection() {
+        // Test with fake hybrid key exchange that looks like PQC but isn't
+        let fake_pqc_extensions = vec![
+            0x00, 0x0A, // Extensions length
+            0x00, 0x33, // Extension type: Key Share
+            0x00, 0x06, // Extension length
+            0x00, 0x04, // Key Share Entry List Length
+            0x00, 0x1D, // Group: x25519 (fake PQC group)
+            0x00, 0x02, // Key Exchange Length
+            0x01, 0x02, // Fake key exchange data
+        ];
+        
+        let mut client_hello_data = vec![
+            0x03, 0x03, // Client version
+        ];
+        client_hello_data.extend_from_slice(&[0x01; 32]); // Random
+        client_hello_data.push(0x00); // Session ID length
+        client_hello_data.extend_from_slice(&[0x00, 0x02]); // Cipher suites length
+        client_hello_data.extend_from_slice(&[0xC0, 0x2F]); // Cipher suite
+        client_hello_data.push(0x01); // Compression methods length
+        client_hello_data.push(0x00); // Compression method
+        client_hello_data.extend_from_slice(&(fake_pqc_extensions.len() as u16).to_be_bytes()); // Extensions length
+        client_hello_data.extend_from_slice(&fake_pqc_extensions);
+        
+        let tls_record = create_tls_record(0x16, 0x0303, &client_hello_data);
+        let packet = create_test_packet(
+            [192, 168, 1, 10],
+            [192, 168, 1, 1],
+            12345,
+            443,
+            0x18,
+            65535,
+            &tls_record,
+        );
+        
+        let result = extract_tls_payload(&packet);
+        assert!(result.is_some());
+        assert_eq!(result.unwrap(), tls_record);
+    }
+
+    #[test]
+    fn test_pqc_with_grease_extensions() {
+        // Test PQC detection in presence of GREASE extensions
+        let grease_and_pqc_extensions = vec![
+            0x00, 0x12, // Extensions length
+            0x1A, 0x1A, // GREASE extension type
+            0x00, 0x02, // Extension length
+            0x00, 0x00, // GREASE data
+            0x00, 0x33, // Extension type: Key Share
+            0x00, 0x06, // Extension length
+            0x00, 0x04, // Key Share Entry List Length
+            0x00, 0x1D, // Group: x25519
+            0x00, 0x02, // Key Exchange Length
+            0x01, 0x02, // Key exchange data
+            0x2A, 0x2A, // Another GREASE extension type
+            0x00, 0x02, // Extension length
+            0x00, 0x00, // GREASE data
+        ];
+        
+        let mut client_hello_data = vec![
+            0x03, 0x03, // Client version
+        ];
+        client_hello_data.extend_from_slice(&[0x01; 32]); // Random
+        client_hello_data.push(0x00); // Session ID length
+        client_hello_data.extend_from_slice(&[0x00, 0x02]); // Cipher suites length
+        client_hello_data.extend_from_slice(&[0xC0, 0x2F]); // Cipher suite
+        client_hello_data.push(0x01); // Compression methods length
+        client_hello_data.push(0x00); // Compression method
+        client_hello_data.extend_from_slice(&(grease_and_pqc_extensions.len() as u16).to_be_bytes()); // Extensions length
+        client_hello_data.extend_from_slice(&grease_and_pqc_extensions);
+        
+        let tls_record = create_tls_record(0x16, 0x0303, &client_hello_data);
+        let packet = create_test_packet(
+            [192, 168, 1, 10],
+            [192, 168, 1, 1],
+            12345,
+            443,
+            0x18,
+            65535,
+            &tls_record,
+        );
+        
+        let result = extract_tls_payload(&packet);
+        assert!(result.is_some());
+        assert_eq!(result.unwrap(), tls_record);
+    }
+
+    #[test]
+    fn test_encrypted_server_hello_with_certificate() {
+        // Test ServerHello with encrypted certificate (TLS 1.3)
+        let mut server_hello_data = vec![
+            0x03, 0x03, // Server version
+        ];
+        server_hello_data.extend_from_slice(&[0x02; 32]); // Random
+        server_hello_data.push(0x00); // Session ID length
+        server_hello_data.extend_from_slice(&[0xC0, 0x2F]); // Cipher suite
+        server_hello_data.push(0x00); // Compression method
+        server_hello_data.extend_from_slice(&[0x00, 0x00]); // Extensions length
+        
+        let tls_record = create_tls_record(0x16, 0x0303, &server_hello_data);
+        let packet = create_test_packet(
+            [192, 168, 1, 1], // Server IP
+            [192, 168, 1, 10], // Client IP
+            443, // Server port
+            12345, // Client port
+            0x18, // SYN + ACK
+            65535,
+            &tls_record,
+        );
+        
+        let result = extract_tls_payload(&packet);
+        assert!(result.is_some());
+        assert_eq!(result.unwrap(), tls_record);
+    }
+
+
+
+    #[test]
+    fn test_ip_header_offset_edge_cases() {
+        // Test with various Ethernet header sizes
+        let mut packet = Vec::new();
+        packet.extend_from_slice(&[0x00; 16]); // 16-byte Ethernet header
+        packet.push(0x45); // IPv4 header start
+        packet.push(0x00);
+        packet.extend_from_slice(&40u16.to_be_bytes());
+        packet.extend_from_slice(&[0x00, 0x00, 0x40, 0x00, 64, 6, 0x00, 0x00]);
+        packet.extend_from_slice(&[192, 168, 1, 10, 192, 168, 1, 1]);
+        packet.extend_from_slice(&[12345u16.to_be_bytes(), 443u16.to_be_bytes()].concat());
+        packet.extend_from_slice(&[0x00; 16]); // Rest of TCP header
+        
+        let result = extract_ip_addresses(&packet);
+        assert!(result.is_some());
+    }
+
+    #[test]
+    fn test_tcp_flags_edge_cases() {
+        // Test TCP flags with various combinations
+        let test_cases = vec![
+            (0x00, "No flags"),
+            (0x01, "FIN only"),
+            (0x02, "SYN only"),
+            (0x04, "RST only"),
+            (0x08, "PSH only"),
+            (0x10, "ACK only"),
+            (0x20, "URG only"),
+            (0x40, "ECE only"),
+            (0x80, "CWR only"),
+            (0x03, "FIN + SYN"),
+            (0x12, "SYN + ACK"),
+            (0x18, "PSH + ACK"),
+            (0xFF, "All flags"),
+        ];
+        
+        for (flags, description) in test_cases {
+            let packet = create_test_packet(
+                [192, 168, 1, 10],
+                [192, 168, 1, 1],
+                12345,
+                443,
+                flags,
+                65535,
+                &[],
+            );
+            
+            let result = extract_tcp_flags(&packet);
+            assert!(result.is_some(), "Failed for {}", description);
+            
+            let extracted_flags = result.unwrap();
+            assert_eq!(extracted_flags.fin, flags & 0x01 != 0, "FIN flag wrong for {}", description);
+            assert_eq!(extracted_flags.syn, flags & 0x02 != 0, "SYN flag wrong for {}", description);
+            assert_eq!(extracted_flags.rst, flags & 0x04 != 0, "RST flag wrong for {}", description);
+            assert_eq!(extracted_flags.psh, flags & 0x08 != 0, "PSH flag wrong for {}", description);
+            assert_eq!(extracted_flags.ack, flags & 0x10 != 0, "ACK flag wrong for {}", description);
+            assert_eq!(extracted_flags.urg, flags & 0x20 != 0, "URG flag wrong for {}", description);
+            assert_eq!(extracted_flags.ece, flags & 0x40 != 0, "ECE flag wrong for {}", description);
+            assert_eq!(extracted_flags.cwr, flags & 0x80 != 0, "CWR flag wrong for {}", description);
+        }
+    }
 }
