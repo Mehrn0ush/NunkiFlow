@@ -1,0 +1,25 @@
+[package]
+name = "NunkiFlow"
+version = "0.1.0"
+edition = "2021"
+authors = [ "Mehrnoush <Mehrnoush.vaseghi@gmail.com>", "Majid Asadi <masadi@nmu.edu>" ]
+
+[dependencies]
+chrono = { version = "0.4", features = ["serde"] }
+etherparse = "0.16.0"
+lazy_static = "1.4"
+nom = "8.0.0"
+pcap = "1.1.0"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+sha2 = "0.10"
+sha3 = "0.10"
+tls-parser = "0.12.2"
+x509-parser = "0.16"
+webpki = "0.22"
+dotenv = "0.15"
+rquest = "2.2.1"
+md5 = "0.7.0"
+rustls = { version = "0.22", features = ["tls12", "logging"] }
+rustls-pemfile = "2.1"
+webpki-roots = "0.26"
