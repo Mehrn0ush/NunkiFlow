@@ -1,1 +1,104 @@
-/target
+# ========================================
+# Rust / Cargo Defaults
+# ========================================
+/target/
+/Cargo.lock
+**/*.rs.bk
+
+# If you're using artifacts or binaries for local testing
+/debug/
+/release/
+/build/
+
+# ========================================
+# IDEs and Editors
+# ========================================
+
+# VSCode
+.vscode/
+*.code-workspace
+
+# JetBrains IDEs (CLion, IntelliJ, RustRover)
+.idea/
+*.iml
+
+# Sublime
+*.sublime-workspace
+*.sublime-project
+
+# Vim
+*.swp
+*.swo
+*~
+
+# Emacs
+*~
+\#*\#
+.\#*
+
+# ========================================
+# OS-specific
+# ========================================
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Windows
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+
+# Linux
+*~
+
+# ========================================
+# Logs, Caches, and Misc
+# ========================================
+*.log
+*.tmp
+*.bak
+*.old
+
+# Coverage / Testing / Benchmarking
+/coverage/
+/htmlcov/
+/lcov.info
+.nyc_output/
+
+# Criterion benchmark results
+/target/criterion/
+
+# Nextest test runner output
+/target/nextest/
+
+# Cargo audit and check artifacts
+.cargo-checksum.json
+.cargo-lock/
+
+# ========================================
+# Optional: Git hooks / custom scripts
+# ========================================
+/hooks/
+/scripts/
+
+# ========================================
+# Optional: ignore local env and config files
+# ========================================
+.env
+.env.*
+*.local
+
+# ========================================
+# Optional: ignore generated docs
+# ========================================
+/target/doc/
+/doc/
+
+# ========================================
+# Optional: Rust toolchains
+# ========================================
+/rust-toolchain.toml
+/rust-toolchain
