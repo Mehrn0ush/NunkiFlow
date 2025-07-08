@@ -20,6 +20,7 @@ use crate::tls_parser::{parse_tls_record, HandshakeMessage};
 // TLS Parser module
 mod tls_parser {
     #[derive(Debug)]
+    #[derive(PartialEq)]
     pub struct TlsRecord<'a> {
         pub content_type: u8,
         pub version: u16,
@@ -28,6 +29,7 @@ mod tls_parser {
     }
 
     #[derive(Debug)]
+    #[derive(PartialEq)]
     pub enum HandshakeMessage<'a> {
         ClientHello(ClientHello<'a>),
         ServerHello(ServerHello<'a>),
@@ -35,6 +37,7 @@ mod tls_parser {
     }
 
     #[derive(Debug)]
+    #[derive(PartialEq)]
     pub struct ClientHello<'a> {
         pub client_version: u16,
         pub random: &'a [u8],
@@ -45,6 +48,7 @@ mod tls_parser {
     }
 
     #[derive(Debug)]
+    #[derive(PartialEq)]
     pub struct ServerHello<'a> {
         pub server_version: u16,
         pub cipher_suite: u16,
@@ -3092,6 +3096,660 @@ pub fn is_ml_dsa_signature_algorithm(sig_alg: u16) -> bool {
         0xFEA3 | // ML-DSA-65 (Dilithium3)  
         0xFEA5   // ML-DSA-87 (Dilithium5)
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tls_parser::{TlsRecord, HandshakeMessage, ClientHello, ServerHello, parse_u16_be, parse_u24_be, parse_tls_record};
+
+    // Helper function to create test data
+    fn create_u16_be(value: u16) -> [u8; 2] {
+        [(value >> 8) as u8, (value & 0xFF) as u8]
+    }
+
+    fn create_u24_be(value: u32) -> [u8; 3] {
+        [(value >> 16) as u8, (value >> 8) as u8, (value & 0xFF) as u8]
+    }
+
+    #[test]
+    fn test_parse_u16_be() {
+        assert_eq!(parse_u16_be(&[0x12, 0x34]), Some(0x1234));
+        assert_eq!(parse_u16_be(&[0x00, 0x00]), Some(0x0000));
+        assert_eq!(parse_u16_be(&[0xFF, 0xFF]), Some(0xFFFF));
+        assert_eq!(parse_u16_be(&[0x12]), None); // Too short
+        assert_eq!(parse_u16_be(&[]), None); // Empty
+    }
+
+    #[test]
+    fn test_parse_u24_be() {
+        assert_eq!(parse_u24_be(&[0x12, 0x34, 0x56]), Some(0x123456));
+        assert_eq!(parse_u24_be(&[0x00, 0x00, 0x00]), Some(0x000000));
+        assert_eq!(parse_u24_be(&[0xFF, 0xFF, 0xFF]), Some(0xFFFFFF));
+        assert_eq!(parse_u24_be(&[0x12, 0x34]), None); // Too short
+        assert_eq!(parse_u24_be(&[]), None); // Empty
+    }
+
+    #[test]
+    fn test_parse_tls_record_too_short() {
+        // Test with data too short for TLS record header
+        assert_eq!(parse_tls_record(&[0x16]), None); // Only content type
+        assert_eq!(parse_tls_record(&[0x16, 0x03, 0x01]), None); // Missing length
+        assert_eq!(parse_tls_record(&[]), None); // Empty data
+    }
+
+    #[test]
+    fn test_parse_tls_record_change_cipher_spec() {
+        // Change Cipher Spec record
+        let data = vec![
+            0x14, // Content type: Change Cipher Spec
+            0x03, 0x01, // Version: TLS 1.0
+            0x00, 0x01, // Length: 1
+            0x01, // Change Cipher Spec message
+        ];
+
+        let result = parse_tls_record(&data);
+        assert!(result.is_some());
+        let record = result.unwrap();
+        assert_eq!(record.content_type, 0x14);
+        assert_eq!(record.version, 0x0301);
+        assert_eq!(record.length, 1);
+        assert!(record.handshake.is_none());
+    }
+
+    #[test]
+    fn test_parse_tls_record_alert() {
+        // Alert record
+        let data = vec![
+            0x15, // Content type: Alert
+            0x03, 0x03, // Version: TLS 1.2
+            0x00, 0x02, // Length: 2
+            0x02, 0x28, // Alert: fatal, handshake failure
+        ];
+
+        let result = parse_tls_record(&data);
+        assert!(result.is_some());
+        let record = result.unwrap();
+        assert_eq!(record.content_type, 0x15);
+        assert_eq!(record.version, 0x0303);
+        assert_eq!(record.length, 2);
+        assert!(record.handshake.is_none());
+    }
+
+    #[test]
+    fn test_parse_tls_record_application_data() {
+        // Application Data record
+        let data = vec![
+            0x17, // Content type: Application Data
+            0x03, 0x03, // Version: TLS 1.2
+            0x00, 0x04, // Length: 4
+            0x01, 0x02, 0x03, 0x04, // Application data
+        ];
+
+        let result = parse_tls_record(&data);
+        assert!(result.is_some());
+        let record = result.unwrap();
+        assert_eq!(record.content_type, 0x17);
+        assert_eq!(record.version, 0x0303);
+        assert_eq!(record.length, 4);
+        assert!(record.handshake.is_none());
+    }
+
+    #[test]
+    fn test_parse_tls_record_encrypted() {
+        // Encrypted record (TLS 1.3)
+        let data = vec![
+            0x80, // Content type: Encrypted
+            0x03, 0x04, // Version: TLS 1.3
+            0x00, 0x08, // Length: 8
+            0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, // Encrypted data
+        ];
+
+        let result = parse_tls_record(&data);
+        assert!(result.is_some());
+        let record = result.unwrap();
+        assert_eq!(record.content_type, 0x80);
+        assert_eq!(record.version, 0x0304);
+        assert_eq!(record.length, 8);
+        assert!(record.handshake.is_none());
+    }
+
+    #[test]
+    fn test_parse_tls_record_unknown_type() {
+        // Unknown record type
+        let data = vec![
+            0x99, // Unknown content type
+            0x03, 0x03, // Version: TLS 1.2
+            0x00, 0x01, // Length: 1
+            0x01, // Data
+        ];
+
+        let result = parse_tls_record(&data);
+        assert!(result.is_some()); // 0x99 >= 0x80, so it's treated as encrypted TLS 1.3 record
+    }
+
+    #[test]
+    fn test_parse_tls_record_incomplete_handshake() {
+        // Handshake record with incomplete data
+        let data = vec![
+            0x16, // Content type: Handshake
+            0x03, 0x03, // Version: TLS 1.2
+            0x00, 0x10, // Length: 16 (but we only have 4 bytes)
+            0x01, // Handshake type: ClientHello
+            0x00, 0x00, 0x0C, // Handshake length: 12
+            // Missing handshake data
+        ];
+
+        let result = parse_tls_record(&data);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_parse_tls_record_client_hello_minimal() {
+        // Minimal ClientHello
+        let client_version = create_u16_be(0x0303); // TLS 1.2
+        let random = [0x01; 32]; // 32 bytes of random data
+        let session_id_len = [0x00]; // No session ID
+        let cipher_suites_len = create_u16_be(2); // One cipher suite
+        let cipher_suite = create_u16_be(0xC02F); // TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256
+        let comp_methods_len = [0x01]; // One compression method
+        let comp_method = [0x00]; // No compression
+        let extensions_len = create_u16_be(0); // No extensions
+
+        let handshake_data = vec![
+            0x01, // Handshake type: ClientHello
+            0x00, 0x00, 0x2A, // Handshake length: 42
+        ];
+
+        let mut client_hello_data = vec![
+            client_version[0], client_version[1], // Client version
+        ];
+        client_hello_data.extend_from_slice(&random); // Random
+        client_hello_data.extend_from_slice(&[
+            session_id_len[0], // Session ID length
+            cipher_suites_len[0], cipher_suites_len[1], // Cipher suites length
+            cipher_suite[0], cipher_suite[1], // Cipher suite
+            comp_methods_len[0], // Compression methods length
+            comp_method[0], // Compression method
+            extensions_len[0], extensions_len[1], // Extensions length
+        ]);
+
+        let data = vec![
+            0x16, // Content type: Handshake
+            0x03, 0x03, // Version: TLS 1.2
+            0x00, 0x2E, // Length: 46 (4 + 42)
+        ];
+
+        let mut full_data = data;
+        full_data.extend(handshake_data);
+        full_data.extend(client_hello_data);
+
+        let result = parse_tls_record(&full_data);
+        assert!(result.is_some());
+        let record = result.unwrap();
+        assert_eq!(record.content_type, 0x16);
+        assert_eq!(record.version, 0x0303);
+        assert_eq!(record.length, 0x2E);
+
+        if let Some(HandshakeMessage::ClientHello(client_hello)) = record.handshake {
+            assert_eq!(client_hello.client_version, 0x0303);
+            assert_eq!(client_hello.random.len(), 32);
+            assert_eq!(client_hello.session_id.len(), 0);
+            assert_eq!(client_hello.cipher_suites.len(), 1);
+            assert_eq!(client_hello.cipher_suites[0], 0xC02F);
+            assert_eq!(client_hello.compression_methods.len(), 1);
+            assert_eq!(client_hello.compression_methods[0], 0x00);
+            assert_eq!(client_hello.extensions.len(), 0);
+        } else {
+            panic!("Expected ClientHello handshake message");
+        }
+    }
+
+    #[test]
+    fn test_parse_tls_record_client_hello_with_extensions() {
+        // ClientHello with extensions
+        let client_version = create_u16_be(0x0304); // TLS 1.3
+        let random = [0x02; 32]; // 32 bytes of random data
+        let session_id_len = [0x00]; // No session ID
+        let cipher_suites_len = create_u16_be(4); // Two cipher suites
+        let cipher_suite1 = create_u16_be(0x1301); // TLS_AES_128_GCM_SHA256
+        let cipher_suite2 = create_u16_be(0x1302); // TLS_AES_256_GCM_SHA384
+        let comp_methods_len = [0x01]; // One compression method
+        let comp_method = [0x00]; // No compression
+
+        // Extensions
+        let extensions_len = create_u16_be(8); // Total extensions length
+        let ext1_type = create_u16_be(0x000A); // supported_groups
+        let ext1_len = create_u16_be(2); // Extension length
+        let ext1_data = [0x00, 0x02]; // Two groups
+        let group1 = create_u16_be(0x0017); // secp256r1
+        let group2 = create_u16_be(0x0018); // secp384r1
+
+        let mut client_hello_data = vec![
+            client_version[0], client_version[1], // Client version
+        ];
+        client_hello_data.extend_from_slice(&random); // Random
+        client_hello_data.extend_from_slice(&[
+            session_id_len[0], // Session ID length
+            cipher_suites_len[0], cipher_suites_len[1], // Cipher suites length
+            cipher_suite1[0], cipher_suite1[1], // First cipher suite
+            cipher_suite2[0], cipher_suite2[1], // Second cipher suite
+            comp_methods_len[0], // Compression methods length
+            comp_method[0], // Compression method
+            extensions_len[0], extensions_len[1], // Extensions length
+            ext1_type[0], ext1_type[1], // Extension type
+            ext1_len[0], ext1_len[1], // Extension length
+            ext1_data[0], ext1_data[1], // Extension data
+            group1[0], group1[1], // First group
+            group2[0], group2[1], // Second group
+        ]);
+
+        let handshake_length = client_hello_data.len();
+        let handshake_data = vec![
+            0x01, // Handshake type: ClientHello
+            ((handshake_length >> 16) & 0xFF) as u8,
+            ((handshake_length >> 8) & 0xFF) as u8,
+            (handshake_length & 0xFF) as u8,
+        ];
+
+        let record_length = 4 + handshake_length;
+        let data = vec![
+            0x16, // Content type: Handshake
+            0x03, 0x04, // Version: TLS 1.3
+            ((record_length >> 8) & 0xFF) as u8,
+            (record_length & 0xFF) as u8,
+        ];
+
+        let mut full_data = data;
+        full_data.extend(handshake_data);
+        full_data.extend(client_hello_data);
+
+        let result = parse_tls_record(&full_data);
+        assert!(result.is_some());
+        let record = result.unwrap();
+
+        if let Some(HandshakeMessage::ClientHello(client_hello)) = record.handshake {
+            assert_eq!(client_hello.client_version, 0x0304);
+            assert_eq!(client_hello.cipher_suites.len(), 2);
+            assert_eq!(client_hello.cipher_suites[0], 0x1301);
+            assert_eq!(client_hello.cipher_suites[1], 0x1302);
+            assert_eq!(client_hello.extensions.len(), 1);
+            assert_eq!(client_hello.extensions[0].0, 0x000A); // supported_groups
+        } else {
+            panic!("Expected ClientHello handshake message");
+        }
+    }
+
+    #[test]
+    fn test_parse_tls_record_server_hello() {
+        // ServerHello
+        let server_version = create_u16_be(0x0303); // TLS 1.2
+        let random = [0x03; 32]; // 32 bytes of random data
+        let session_id_len = [0x00]; // No session ID
+        let cipher_suite = create_u16_be(0xC02F); // TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256
+        let comp_method = [0x00]; // No compression
+        let extensions_len = create_u16_be(0); // No extensions
+
+        let handshake_data = vec![
+            0x02, // Handshake type: ServerHello
+            0x00, 0x00, 0x28, // Handshake length: 40 (calculated: 2+32+1+2+1+2 = 40)
+        ];
+
+        let mut server_hello_data = vec![
+            server_version[0], server_version[1], // Server version
+        ];
+        server_hello_data.extend_from_slice(&random); // Random
+        server_hello_data.extend_from_slice(&[
+            session_id_len[0], // Session ID length
+            cipher_suite[0], cipher_suite[1], // Selected cipher suite
+            comp_method[0], // Compression method
+            extensions_len[0], extensions_len[1], // Extensions length
+        ]);
+
+        let data = vec![
+            0x16, // Content type: Handshake
+            0x03, 0x03, // Version: TLS 1.2
+            0x00, 0x2C, // Length: 44 (4 + 40)
+        ];
+
+        let mut full_data = data;
+        full_data.extend(handshake_data);
+        full_data.extend(server_hello_data);
+
+        let result = parse_tls_record(&full_data);
+        assert!(result.is_some());
+        let record = result.unwrap();
+
+        if let Some(HandshakeMessage::ServerHello(server_hello)) = record.handshake {
+            assert_eq!(server_hello.server_version, 0x0303);
+            assert_eq!(server_hello.cipher_suite, 0xC02F);
+            assert_eq!(server_hello.extensions.len(), 0);
+        } else {
+            panic!("Expected ServerHello handshake message");
+        }
+    }
+
+    #[test]
+    fn test_parse_tls_record_certificate() {
+        // Certificate message (TLS 1.3 format)
+        let cert_data = [0x04, 0x05, 0x06, 0x07]; // Dummy certificate data
+        let cert_len = create_u24_be(4); // Certificate length
+        let ext_len = create_u16_be(0); // No extensions
+        let cert_list_len = create_u24_be(9); // 3+4+2=9
+
+        let handshake_data = vec![
+            0x0B, // Handshake type: Certificate
+            0x00, 0x00, 0x0D, // Handshake length: 13
+        ];
+
+        let cert_message_data = vec![
+            0x00, // certificate_request_context length: 0
+            cert_list_len[0], cert_list_len[1], cert_list_len[2], // Certificate list length: 9
+            cert_len[0], cert_len[1], cert_len[2], // Individual certificate length: 4
+            cert_data[0], cert_data[1], cert_data[2], cert_data[3], // Certificate data
+            ext_len[0], ext_len[1], // Extensions length: 0
+        ];
+
+        let data = vec![
+            0x16, // Content type: Handshake
+            0x03, 0x03, // Version: TLS 1.2
+            0x00, 0x11, // Length: 17 (4 + 13)
+        ];
+
+        let mut full_data = data;
+        full_data.extend(handshake_data);
+        full_data.extend(cert_message_data);
+
+        let result = parse_tls_record(&full_data);
+        assert!(result.is_some());
+        let record = result.unwrap();
+
+        if let Some(HandshakeMessage::Certificate(certificates)) = record.handshake {
+            assert_eq!(certificates.len(), 1);
+            assert_eq!(certificates[0], &[0x04, 0x05, 0x06, 0x07]);
+        } else {
+            panic!("Expected Certificate handshake message");
+        }
+    }
+
+    #[test]
+    fn test_parse_tls_record_unknown_handshake() {
+        // Unknown handshake type
+        let handshake_data = vec![
+            0x99, // Unknown handshake type
+            0x00, 0x00, 0x01, // Handshake length: 1
+            0x01, // Some data
+        ];
+
+        let data = vec![
+            0x16, // Content type: Handshake
+            0x03, 0x03, // Version: TLS 1.2
+            0x00, 0x05, // Length: 5 (4 + 1)
+        ];
+
+        let mut full_data = data;
+        full_data.extend(handshake_data);
+
+        let result = parse_tls_record(&full_data);
+        assert!(result.is_some());
+        let record = result.unwrap();
+        assert!(record.handshake.is_none()); // Unknown handshake types return None
+    }
+
+    #[test]
+    fn test_parse_tls_record_client_hello_incomplete() {
+        // ClientHello with incomplete data
+        let handshake_data = vec![
+            0x01, // Handshake type: ClientHello
+            0x00, 0x00, 0x10, // Handshake length: 16
+        ];
+
+        let incomplete_client_hello = vec![
+            0x03, 0x03, // Client version
+            // Missing random data, session ID, etc.
+        ];
+
+        let data = vec![
+            0x16, // Content type: Handshake
+            0x03, 0x03, // Version: TLS 1.2
+            0x00, 0x14, // Length: 20 (4 + 16)
+        ];
+
+        let mut full_data = data;
+        full_data.extend(handshake_data);
+        full_data.extend(incomplete_client_hello);
+
+        let result = parse_tls_record(&full_data);
+        assert!(result.is_none()); // Should fail due to incomplete data
+    }
+
+    #[test]
+    fn test_parse_tls_record_server_hello_incomplete() {
+        // ServerHello with incomplete data
+        let handshake_data = vec![
+            0x02, // Handshake type: ServerHello
+            0x00, 0x00, 0x10, // Handshake length: 16
+        ];
+
+        let incomplete_server_hello = vec![
+            0x03, 0x03, // Server version
+            // Missing random data, session ID, etc.
+        ];
+
+        let data = vec![
+            0x16, // Content type: Handshake
+            0x03, 0x03, // Version: TLS 1.2
+            0x00, 0x14, // Length: 20 (4 + 16)
+        ];
+
+        let mut full_data = data;
+        full_data.extend(handshake_data);
+        full_data.extend(incomplete_server_hello);
+
+        let result = parse_tls_record(&full_data);
+        assert!(result.is_none()); // Should fail due to incomplete data
+    }
+
+    #[test]
+    fn test_parse_tls_record_with_session_id() {
+        // ClientHello with session ID
+        let client_version = create_u16_be(0x0303); // TLS 1.2
+        let random = [0x04; 32]; // 32 bytes of random data
+        let session_id_len = [0x04]; // Session ID length: 4
+        let session_id = [0xAA, 0xBB, 0xCC, 0xDD]; // Session ID data
+        let cipher_suites_len = create_u16_be(2); // One cipher suite
+        let cipher_suite = create_u16_be(0xC02F); // TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256
+        let comp_methods_len = [0x01]; // One compression method
+        let comp_method = [0x00]; // No compression
+        let extensions_len = create_u16_be(0); // No extensions
+
+        let handshake_data = vec![
+            0x01, // Handshake type: ClientHello
+            0x00, 0x00, 0x2E, // Handshake length: 46
+        ];
+
+        let mut client_hello_data = vec![
+            client_version[0], client_version[1], // Client version
+        ];
+        client_hello_data.extend_from_slice(&random); // Random
+        client_hello_data.extend_from_slice(&[
+            session_id_len[0], // Session ID length
+        ]);
+        client_hello_data.extend_from_slice(&session_id); // Session ID
+        client_hello_data.extend_from_slice(&[
+            cipher_suites_len[0], cipher_suites_len[1], // Cipher suites length
+            cipher_suite[0], cipher_suite[1], // Cipher suite
+            comp_methods_len[0], // Compression methods length
+            comp_method[0], // Compression method
+            extensions_len[0], extensions_len[1], // Extensions length
+        ]);
+
+        let data = vec![
+            0x16, // Content type: Handshake
+            0x03, 0x03, // Version: TLS 1.2
+            0x00, 0x32, // Length: 50 (4 + 46)
+        ];
+
+        let mut full_data = data;
+        full_data.extend(handshake_data);
+        full_data.extend(client_hello_data);
+
+        let result = parse_tls_record(&full_data);
+        assert!(result.is_some());
+        let record = result.unwrap();
+
+        if let Some(HandshakeMessage::ClientHello(client_hello)) = record.handshake {
+            assert_eq!(client_hello.session_id.len(), 4);
+            assert_eq!(client_hello.session_id, &[0xAA, 0xBB, 0xCC, 0xDD]);
+        } else {
+            panic!("Expected ClientHello handshake message");
+        }
+    }
+
+    #[test]
+    fn test_parse_tls_record_multiple_cipher_suites() {
+        // ClientHello with multiple cipher suites
+        let client_version = create_u16_be(0x0303); // TLS 1.2
+        let random = [0x05; 32]; // 32 bytes of random data
+        let session_id_len = [0x00]; // No session ID
+        let cipher_suites_len = create_u16_be(6); // Three cipher suites
+        let cipher_suite1 = create_u16_be(0xC02F); // TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256
+        let cipher_suite2 = create_u16_be(0xC030); // TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384
+        let cipher_suite3 = create_u16_be(0x009C); // TLS_RSA_WITH_AES_128_GCM_SHA256
+        let comp_methods_len = [0x01]; // One compression method
+        let comp_method = [0x00]; // No compression
+        let extensions_len = create_u16_be(0); // No extensions
+
+        let handshake_data = vec![
+            0x01, // Handshake type: ClientHello
+            0x00, 0x00, 0x2E, // Handshake length: 46
+        ];
+
+        let mut client_hello_data = vec![
+            client_version[0], client_version[1], // Client version
+        ];
+        client_hello_data.extend_from_slice(&random); // Random
+        client_hello_data.extend_from_slice(&[
+            session_id_len[0], // Session ID length
+            cipher_suites_len[0], cipher_suites_len[1], // Cipher suites length
+            cipher_suite1[0], cipher_suite1[1], // First cipher suite
+            cipher_suite2[0], cipher_suite2[1], // Second cipher suite
+            cipher_suite3[0], cipher_suite3[1], // Third cipher suite
+            comp_methods_len[0], // Compression methods length
+            comp_method[0], // Compression method
+            extensions_len[0], extensions_len[1], // Extensions length
+        ]);
+
+        let data = vec![
+            0x16, // Content type: Handshake
+            0x03, 0x03, // Version: TLS 1.2
+            0x00, 0x32, // Length: 50 (4 + 46)
+        ];
+
+        let mut full_data = data;
+        full_data.extend(handshake_data);
+        full_data.extend(client_hello_data);
+
+        let result = parse_tls_record(&full_data);
+        assert!(result.is_some());
+        let record = result.unwrap();
+
+        if let Some(HandshakeMessage::ClientHello(client_hello)) = record.handshake {
+            assert_eq!(client_hello.cipher_suites.len(), 3);
+            assert_eq!(client_hello.cipher_suites[0], 0xC02F);
+            assert_eq!(client_hello.cipher_suites[1], 0xC030);
+            assert_eq!(client_hello.cipher_suites[2], 0x009C);
+        } else {
+            panic!("Expected ClientHello handshake message");
+        }
+    }
+
+    // Additional tests for PQC-related functionality
+    #[test]
+    fn test_pqc_detection_functions() {
+        // Test PQC key exchange detection
+        assert!(is_pqc_key_share(0x0200)); // MLKEM512
+        assert!(is_pqc_key_share(0x023A)); // Kyber512
+        assert!(!is_pqc_key_share(0x0017)); // secp256r1 (classical)
+
+        // Test hybrid key exchange detection
+        assert!(is_hybrid_key_share(0x2F39)); // X25519Kyber768
+        assert!(!is_hybrid_key_share(0x0200)); // MLKEM512 (not hybrid)
+
+        // Test PQC signature detection
+        assert!(is_pqc_signature_algorithm(0xFEA0)); // ML-DSA-44
+        assert!(is_pqc_signature_algorithm(0xFEA3)); // ML-DSA-65
+        assert!(!is_pqc_signature_algorithm(0x0401)); // RSA-PKCS1-SHA256 (classical)
+
+        // Test hybrid signature detection
+        assert!(is_hybrid_signature_algorithm(0xFEA1)); // P256_Dilithium2
+        assert!(!is_hybrid_signature_algorithm(0xFEA0)); // ML-DSA-44 (not hybrid)
+    }
+
+    #[test]
+    fn test_cipher_suite_classification() {
+        // Test classical cipher suite classification
+        assert_eq!(classify_cipher_suite(0x1301), "TLS_AES_128_GCM_SHA256");
+        assert_eq!(classify_cipher_suite(0x1302), "TLS_AES_256_GCM_SHA384");
+        assert_eq!(classify_cipher_suite(0xC02F), "Classical");
+
+        // Test key exchange classification
+        assert_eq!(classify_key_exchange(0x0200), "MLKEM512");
+        assert_eq!(classify_key_exchange(0x023A), "Kyber512");
+        assert_eq!(classify_key_exchange(0x2F39), "X25519Kyber768");
+        assert_eq!(classify_key_exchange(0x0017), "secp256r1");
+
+        // Test signature algorithm classification
+        assert_eq!(classify_signature_algorithm(0xFEA0), "ML-DSA-44");
+        assert_eq!(classify_signature_algorithm(0xFEA1), "P256_Dilithium2");
+        assert_eq!(classify_signature_algorithm(0x0401), "RSA-PKCS1-SHA256");
+    }
+
+    #[test]
+    fn test_grease_value_detection() {
+        // Test GREASE value detection
+        assert!(is_grease_value(0x0A0A));
+        assert!(is_grease_value(0x1A1A));
+        assert!(is_grease_value(0x2A2A));
+        assert!(is_grease_value(0x3A3A));
+        assert!(is_grease_value(0x4A4A));
+        assert!(is_grease_value(0x5A5A));
+        assert!(is_grease_value(0x6A6A));
+        assert!(is_grease_value(0x7A7A));
+        assert!(is_grease_value(0x8A8A));
+        assert!(is_grease_value(0x9A9A));
+        assert!(is_grease_value(0xAAAA));
+        assert!(is_grease_value(0xBABA));
+        assert!(is_grease_value(0xCACA));
+        assert!(is_grease_value(0xDADA));
+        assert!(is_grease_value(0xEAEA));
+        assert!(is_grease_value(0xFAFA));
+
+        // Test non-GREASE values
+        assert!(!is_grease_value(0x0001));
+        assert!(!is_grease_value(0x1301));
+        assert!(!is_grease_value(0xC02F));
+    }
+
+    #[test]
+    fn test_extension_parsing() {
+        // Test extension ID to name conversion
+        assert_eq!(extension_id_to_name(0x0000), "server_name");
+        assert_eq!(extension_id_to_name(0x000A), "supported_groups");
+        assert_eq!(extension_id_to_name(0x002B), "supported_versions");
+        assert_eq!(extension_id_to_name(0x0033), "key_share");
+        assert_eq!(extension_id_to_name(0x9999), "unknown_0x9999");
+
+        // Test GREASE extension detection
+        assert!(is_grease_extension(0x0A0A));
+        assert!(!is_grease_extension(0x000A));
+
+        // Test PQC relevant extension detection
+        assert!(is_pqc_relevant_extension(0x000A)); // supported_groups
+        assert!(is_pqc_relevant_extension(0x0033)); // key_share
+        assert!(is_pqc_relevant_extension(0x000D)); // signature_algorithms
+        assert!(!is_pqc_relevant_extension(0x0000)); // server_name
+    }
 }
 
 

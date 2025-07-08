@@ -384,8 +384,8 @@ pub fn extract_tls_payload(data: &[u8]) -> Option<Vec<u8>> {
         let version_major = payload[1];
         let version_minor = payload[2];
         
-        // Check for valid TLS content types (20-23 for TLS 1.0-1.2, 0x14-0x17 for TLS 1.3)
-        if (content_type >= 20 && content_type <= 23) || content_type >= 0x14 {
+        // Accept 0x14–0x18 as valid TLS content types, and specific encrypted record types
+        if (content_type >= 0x14 && content_type <= 0x18) || content_type == 0x80 {
             // Check for reasonable TLS versions
             if (version_major == 3 && version_minor <= 4) || // TLS 1.0-1.3
                (version_major >= 0x7f) // TLS 1.3 encrypted records
@@ -396,4 +396,577 @@ pub fn extract_tls_payload(data: &[u8]) -> Option<Vec<u8>> {
     }
     
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Helper function to create a complete packet with Ethernet + IPv4 + TCP headers
+    fn create_test_packet(
+        src_ip: [u8; 4],
+        dst_ip: [u8; 4],
+        src_port: u16,
+        dst_port: u16,
+        tcp_flags: u8,
+        window_size: u16,
+        payload: &[u8],
+    ) -> Vec<u8> {
+        let mut packet = Vec::new();
+        
+        // Ethernet header (14 bytes)
+        packet.extend_from_slice(&[0x00; 14]); // Dummy Ethernet header
+        
+        // IPv4 header (20 bytes)
+        packet.push(0x45); // Version 4, IHL 5 (20 bytes)
+        packet.push(0x00); // Type of Service
+        packet.extend_from_slice(&((20 + 20 + payload.len()) as u16).to_be_bytes()); // Total Length
+        packet.extend_from_slice(&[0x00, 0x00]); // Identification
+        packet.extend_from_slice(&[0x40, 0x00]); // Flags and Fragment Offset
+        packet.push(64); // TTL
+        packet.push(6); // Protocol (TCP)
+        packet.extend_from_slice(&[0x00, 0x00]); // Checksum (dummy)
+        packet.extend_from_slice(&src_ip); // Source IP
+        packet.extend_from_slice(&dst_ip); // Destination IP
+        
+        // TCP header (20 bytes)
+        packet.extend_from_slice(&src_port.to_be_bytes()); // Source Port
+        packet.extend_from_slice(&dst_port.to_be_bytes()); // Destination Port
+        packet.extend_from_slice(&[0x00, 0x00, 0x00, 0x00]); // Sequence Number
+        packet.extend_from_slice(&[0x00, 0x00, 0x00, 0x00]); // Acknowledgment Number
+        packet.push(0x50); // Data Offset (5 * 4 = 20 bytes)
+        packet.push(tcp_flags); // Flags
+        packet.extend_from_slice(&window_size.to_be_bytes()); // Window Size
+        packet.extend_from_slice(&[0x00, 0x00]); // Checksum (dummy)
+        packet.extend_from_slice(&[0x00, 0x00]); // Urgent Pointer
+        
+        // Payload
+        packet.extend_from_slice(payload);
+        
+        packet
+    }
+
+    // Helper function to create a TLS record
+    fn create_tls_record(content_type: u8, version: u16, payload: &[u8]) -> Vec<u8> {
+        let mut record = Vec::new();
+        record.push(content_type);
+        record.extend_from_slice(&version.to_be_bytes());
+        record.extend_from_slice(&(payload.len() as u16).to_be_bytes());
+        record.extend_from_slice(payload);
+        record
+    }
+
+    #[test]
+    fn test_tcp_flags_default() {
+        let flags = TcpFlags::default();
+        assert!(!flags.fin);
+        assert!(!flags.syn);
+        assert!(!flags.rst);
+        assert!(!flags.psh);
+        assert!(!flags.ack);
+        assert!(!flags.urg);
+        assert!(!flags.ece);
+        assert!(!flags.cwr);
+    }
+
+    #[test]
+    fn test_tcp_flags_clone() {
+        let flags = TcpFlags {
+            fin: true,
+            syn: true,
+            rst: false,
+            psh: true,
+            ack: false,
+            urg: false,
+            ece: true,
+            cwr: false,
+        };
+        let cloned = flags.clone();
+        assert_eq!(flags.fin, cloned.fin);
+        assert_eq!(flags.syn, cloned.syn);
+        assert_eq!(flags.rst, cloned.rst);
+        assert_eq!(flags.psh, cloned.psh);
+        assert_eq!(flags.ack, cloned.ack);
+        assert_eq!(flags.urg, cloned.urg);
+        assert_eq!(flags.ece, cloned.ece);
+        assert_eq!(flags.cwr, cloned.cwr);
+    }
+
+    #[test]
+    fn test_tls_buffer_new() {
+        let buffer = TlsBuffer::new();
+        assert!(buffer.data.is_empty());
+    }
+
+    #[test]
+    fn test_tls_buffer_add_data_empty() {
+        let mut buffer = TlsBuffer::new();
+        assert!(!buffer.add_data(&[]));
+        assert!(buffer.data.is_empty());
+    }
+
+    #[test]
+    fn test_tls_buffer_has_complete_record_too_short() {
+        let buffer = TlsBuffer {
+            data: vec![0x16, 0x03, 0x03, 0x00, 0x05], // Only header, no payload
+        };
+        assert!(!buffer.has_complete_record());
+    }
+
+    #[test]
+    fn test_tls_buffer_has_complete_record_complete() {
+        let mut buffer = TlsBuffer {
+            data: vec![0x16, 0x03, 0x03, 0x00, 0x05, 0x01, 0x02, 0x03, 0x04, 0x05], // Header + 5 bytes payload
+        };
+        assert!(buffer.has_complete_record());
+    }
+
+    #[test]
+    fn test_tls_buffer_get_record_complete() {
+        let mut buffer = TlsBuffer {
+            data: vec![0x16, 0x03, 0x03, 0x00, 0x05, 0x01, 0x02, 0x03, 0x04, 0x05],
+        };
+        let record = buffer.get_record();
+        assert!(record.is_some());
+        let record = record.unwrap();
+        assert_eq!(record, vec![0x16, 0x03, 0x03, 0x00, 0x05, 0x01, 0x02, 0x03, 0x04, 0x05]);
+        assert!(buffer.data.is_empty());
+    }
+
+    #[test]
+    fn test_tls_buffer_get_record_incomplete() {
+        let mut buffer = TlsBuffer {
+            data: vec![0x16, 0x03, 0x03, 0x00, 0x05, 0x01, 0x02], // Incomplete payload
+        };
+        let record = buffer.get_record();
+        assert!(record.is_none());
+    }
+
+    #[test]
+    fn test_tls_buffer_multiple_records() {
+        let mut buffer = TlsBuffer::new();
+        
+        // Add first record
+        let record1 = create_tls_record(0x16, 0x0303, &[0x01, 0x02, 0x03]);
+        let record2 = create_tls_record(0x17, 0x0303, &[0x04, 0x05, 0x06, 0x07]);
+        
+        buffer.add_data(&record1);
+        buffer.add_data(&record2);
+        
+        // Get first record
+        let extracted1 = buffer.get_record();
+        assert!(extracted1.is_some());
+        assert_eq!(extracted1.unwrap(), record1);
+        
+        // Get second record
+        let extracted2 = buffer.get_record();
+        assert!(extracted2.is_some());
+        assert_eq!(extracted2.unwrap(), record2);
+        
+        // No more records
+        assert!(buffer.get_record().is_none());
+    }
+
+    #[test]
+    fn test_extract_ip_addresses_valid() {
+        let packet = create_test_packet(
+            [192, 168, 1, 10],
+            [192, 168, 1, 1],
+            12345,
+            80,
+            0x18, // SYN + ACK
+            65535,
+            &[],
+        );
+        
+        let result = extract_ip_addresses(&packet);
+        assert!(result.is_some());
+        let (src_ip, dst_ip) = result.unwrap();
+        assert_eq!(src_ip, [192, 168, 1, 10]);
+        assert_eq!(dst_ip, [192, 168, 1, 1]);
+    }
+
+    #[test]
+    fn test_extract_ip_addresses_zero_src() {
+        let packet = create_test_packet(
+            [0, 0, 0, 0], // Zero source IP
+            [192, 168, 1, 1],
+            12345,
+            80,
+            0x18,
+            65535,
+            &[],
+        );
+        
+        let result = extract_ip_addresses(&packet);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_extract_ip_addresses_zero_dst() {
+        let packet = create_test_packet(
+            [192, 168, 1, 10],
+            [0, 0, 0, 0], // Zero destination IP
+            12345,
+            80,
+            0x18,
+            65535,
+            &[],
+        );
+        
+        let result = extract_ip_addresses(&packet);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_extract_ip_addresses_too_short() {
+        let result = extract_ip_addresses(&[0x45, 0x00, 0x00, 0x14]);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_extract_tcp_ports_valid() {
+        let packet = create_test_packet(
+            [192, 168, 1, 10],
+            [192, 168, 1, 1],
+            12345,
+            443,
+            0x18,
+            65535,
+            &[],
+        );
+        
+        let result = extract_tcp_ports(&packet);
+        assert!(result.is_some());
+        let (src_port, dst_port) = result.unwrap();
+        assert_eq!(src_port, 12345);
+        assert_eq!(dst_port, 443);
+    }
+
+    #[test]
+    fn test_extract_tcp_ports_not_tcp() {
+        let mut packet = create_test_packet(
+            [192, 168, 1, 10],
+            [192, 168, 1, 1],
+            12345,
+            443,
+            0x18,
+            65535,
+            &[],
+        );
+        
+        // Change protocol to UDP (17)
+        packet[23] = 17;
+        
+        let result = extract_tcp_ports(&packet);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_extract_tcp_ports_too_short() {
+        let result = extract_tcp_ports(&[0x45, 0x00, 0x00, 0x14]);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_extract_tcp_flags_syn() {
+        let packet = create_test_packet(
+            [192, 168, 1, 10],
+            [192, 168, 1, 1],
+            12345,
+            443,
+            0x02, // SYN flag
+            65535,
+            &[],
+        );
+        
+        let result = extract_tcp_flags(&packet);
+        assert!(result.is_some());
+        let flags = result.unwrap();
+        assert!(!flags.fin);
+        assert!(flags.syn);
+        assert!(!flags.rst);
+        assert!(!flags.psh);
+        assert!(!flags.ack);
+        assert!(!flags.urg);
+        assert!(!flags.ece);
+        assert!(!flags.cwr);
+    }
+
+    #[test]
+    fn test_extract_tcp_flags_all_flags() {
+        let packet = create_test_packet(
+            [192, 168, 1, 10],
+            [192, 168, 1, 1],
+            12345,
+            443,
+            0xFF, // All flags
+            65535,
+            &[],
+        );
+        
+        let result = extract_tcp_flags(&packet);
+        assert!(result.is_some());
+        let flags = result.unwrap();
+        assert!(flags.fin);
+        assert!(flags.syn);
+        assert!(flags.rst);
+        assert!(flags.psh);
+        assert!(flags.ack);
+        assert!(flags.urg);
+        assert!(flags.ece);
+        assert!(flags.cwr);
+    }
+
+    #[test]
+    fn test_extract_tcp_flags_too_short() {
+        let result = extract_tcp_flags(&[0x45, 0x00, 0x00, 0x14]);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_extract_window_size_valid() {
+        let packet = create_test_packet(
+            [192, 168, 1, 10],
+            [192, 168, 1, 1],
+            12345,
+            443,
+            0x18,
+            8192, // Window size
+            &[],
+        );
+        
+        let result = extract_window_size(&packet);
+        assert!(result.is_some());
+        assert_eq!(result.unwrap(), 8192);
+    }
+
+    #[test]
+    fn test_extract_window_size_too_short() {
+        let result = extract_window_size(&[0x45, 0x00, 0x00, 0x14]);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_get_total_header_len_valid() {
+        let packet = create_test_packet(
+            [192, 168, 1, 10],
+            [192, 168, 1, 1],
+            12345,
+            443,
+            0x18,
+            65535,
+            &[],
+        );
+        
+        let result = get_total_header_len(&packet);
+        assert!(result.is_some());
+        // Ethernet (14) + IP (20) + TCP (20) = 54
+        assert_eq!(result.unwrap(), 54);
+    }
+
+    #[test]
+    fn test_get_total_header_len_too_short() {
+        let result = get_total_header_len(&[0x45, 0x00, 0x00, 0x14]);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_extract_tls_payload_valid_handshake() {
+        let tls_record = create_tls_record(0x16, 0x0303, &[0x01, 0x02, 0x03, 0x04, 0x05]);
+        let packet = create_test_packet(
+            [192, 168, 1, 10],
+            [192, 168, 1, 1],
+            12345,
+            443,
+            0x18,
+            65535,
+            &tls_record,
+        );
+        
+        let result = extract_tls_payload(&packet);
+        assert!(result.is_some());
+        assert_eq!(result.unwrap(), tls_record);
+    }
+
+    #[test]
+    fn test_extract_tls_payload_valid_application_data() {
+        let tls_record = create_tls_record(0x17, 0x0303, &[0x01, 0x02, 0x03, 0x04, 0x05]);
+        let packet = create_test_packet(
+            [192, 168, 1, 10],
+            [192, 168, 1, 1],
+            12345,
+            443,
+            0x18,
+            65535,
+            &tls_record,
+        );
+        
+        let result = extract_tls_payload(&packet);
+        assert!(result.is_some());
+        assert_eq!(result.unwrap(), tls_record);
+    }
+
+    #[test]
+    fn test_extract_tls_payload_tls13_encrypted() {
+        let tls_record = create_tls_record(0x80, 0x0304, &[0x01, 0x02, 0x03, 0x04, 0x05]);
+        let packet = create_test_packet(
+            [192, 168, 1, 10],
+            [192, 168, 1, 1],
+            12345,
+            443,
+            0x18,
+            65535,
+            &tls_record,
+        );
+        
+        let result = extract_tls_payload(&packet);
+        assert!(result.is_some());
+        assert_eq!(result.unwrap(), tls_record);
+    }
+
+    #[test]
+    fn test_extract_tls_payload_invalid_content_type() {
+        let tls_record = create_tls_record(0x99, 0x0303, &[0x01, 0x02, 0x03, 0x04, 0x05]);
+        let packet = create_test_packet(
+            [192, 168, 1, 10],
+            [192, 168, 1, 1],
+            12345,
+            443,
+            0x18,
+            65535,
+            &tls_record,
+        );
+        
+        let result = extract_tls_payload(&packet);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_extract_tls_payload_invalid_version() {
+        let tls_record = create_tls_record(0x16, 0x0404, &[0x01, 0x02, 0x03, 0x04, 0x05]);
+        let packet = create_test_packet(
+            [192, 168, 1, 10],
+            [192, 168, 1, 1],
+            12345,
+            443,
+            0x18,
+            65535,
+            &tls_record,
+        );
+        
+        let result = extract_tls_payload(&packet);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_extract_tls_payload_not_tcp() {
+        let tls_record = create_tls_record(0x16, 0x0303, &[0x01, 0x02, 0x03, 0x04, 0x05]);
+        let mut packet = create_test_packet(
+            [192, 168, 1, 10],
+            [192, 168, 1, 1],
+            12345,
+            443,
+            0x18,
+            65535,
+            &tls_record,
+        );
+        
+        // Change protocol to UDP (17)
+        packet[23] = 17;
+        
+        let result = extract_tls_payload(&packet);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_extract_tls_payload_no_payload() {
+        let packet = create_test_packet(
+            [192, 168, 1, 10],
+            [192, 168, 1, 1],
+            12345,
+            443,
+            0x18,
+            65535,
+            &[], // No payload
+        );
+        
+        let result = extract_tls_payload(&packet);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_extract_tls_payload_too_short() {
+        let result = extract_tls_payload(&[0x45, 0x00, 0x00, 0x14]);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_find_ip_header_offset_standard_ethernet() {
+        let packet = create_test_packet(
+            [192, 168, 1, 10],
+            [192, 168, 1, 1],
+            12345,
+            443,
+            0x18,
+            65535,
+            &[],
+        );
+        
+        // This should find the IP header at offset 14 (standard Ethernet)
+        let result = extract_ip_addresses(&packet);
+        assert!(result.is_some());
+    }
+
+    #[test]
+    fn test_find_ip_header_offset_no_ethernet() {
+        // Create packet without Ethernet header
+        let mut packet = Vec::new();
+        
+        // IPv4 header (20 bytes)
+        packet.push(0x45); // Version 4, IHL 5 (20 bytes)
+        packet.push(0x00); // Type of Service
+        packet.extend_from_slice(&40u16.to_be_bytes()); // Total Length
+        packet.extend_from_slice(&[0x00, 0x00]); // Identification
+        packet.extend_from_slice(&[0x40, 0x00]); // Flags and Fragment Offset
+        packet.push(64); // TTL
+        packet.push(6); // Protocol (TCP)
+        packet.extend_from_slice(&[0x00, 0x00]); // Checksum (dummy)
+        packet.extend_from_slice(&[192, 168, 1, 10]); // Source IP
+        packet.extend_from_slice(&[192, 168, 1, 1]); // Destination IP
+        
+        // TCP header (20 bytes)
+        packet.extend_from_slice(&12345u16.to_be_bytes()); // Source Port
+        packet.extend_from_slice(&443u16.to_be_bytes()); // Destination Port
+        packet.extend_from_slice(&[0x00, 0x00, 0x00, 0x00]); // Sequence Number
+        packet.extend_from_slice(&[0x00, 0x00, 0x00, 0x00]); // Acknowledgment Number
+        packet.push(0x50); // Data Offset (5 * 4 = 20 bytes)
+        packet.push(0x18); // Flags
+        packet.extend_from_slice(&65535u16.to_be_bytes()); // Window Size
+        packet.extend_from_slice(&[0x00, 0x00]); // Checksum (dummy)
+        packet.extend_from_slice(&[0x00, 0x00]); // Urgent Pointer
+        
+        let result = extract_ip_addresses(&packet);
+        assert!(result.is_some());
+        let (src_ip, dst_ip) = result.unwrap();
+        assert_eq!(src_ip, [192, 168, 1, 10]);
+        assert_eq!(dst_ip, [192, 168, 1, 1]);
+    }
+
+    #[test]
+    fn test_edge_cases() {
+        // Test with minimum valid packet
+        let mut packet = Vec::new();
+        packet.extend_from_slice(&[0x00; 14]); // Ethernet header
+        packet.push(0x45); // IPv4 header start
+        packet.push(0x00);
+        packet.extend_from_slice(&40u16.to_be_bytes());
+        packet.extend_from_slice(&[0x00, 0x00, 0x40, 0x00, 64, 6, 0x00, 0x00]);
+        packet.extend_from_slice(&[192, 168, 1, 10, 192, 168, 1, 1]);
+        packet.extend_from_slice(&[12345u16.to_be_bytes(), 443u16.to_be_bytes()].concat());
+        packet.extend_from_slice(&[0x00; 16]); // Rest of TCP header
+        
+        let result = extract_ip_addresses(&packet);
+        assert!(result.is_some());
+    }
 }
