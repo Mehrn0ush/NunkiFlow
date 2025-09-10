@@ -297,7 +297,7 @@ If you use Nunkiflow in your research, please cite:
 ```bibtex
 @software{nunkiflow2025,
   title={Nunkiflow: Post-Quantum Cryptography Network Flow Analysis Tool},
-  authors={Mehrnoush Vaseghipanah, Majdi Asadi},
+  authors={Mehrnoush Vaseghipanah},
   year={2025},
   url={https://github.com/Mehrn0ush/nunkiflow},
   note={Version 1.0.0}
